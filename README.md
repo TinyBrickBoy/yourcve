@@ -27,6 +27,18 @@ Ohne `--profile tls` lauscht Anubis auf Port 8923 und dein eigener Reverse Proxy
 
 Beim ersten Start importiert yourcve die komplette Historie (cvelistV5 Archiv, NVD, OSV Ökosysteme, CPE Katalog). Das dauert je nach API Key 30 bis 90 Minuten; der Fortschritt steht unter **Admin** und im Log. Ohne `SMTP_URL` werden Login Links ins Log geschrieben (`docker compose logs yourcve | grep link`).
 
+## Deployment mit Coolify
+
+Für Coolify gibt es `docker-compose.coolify.yml`. Coolify erzeugt Domain, Datenbank Passwort, `SECRET_KEY` und den Anubis Schlüssel selbst (Magic Variables) und macht TLS mit seinem Proxy; eine `.env` und Caddy sind nicht nötig.
+
+1. In Coolify: Projekt öffnen, **+ New**, das Git Repository wählen (öffentlich oder per GitHub App).
+2. Unter **General**: Build Pack **Docker Compose**, Base Directory `/`, Docker Compose Location `/docker-compose.coolify.yml`. Speichern und **Reload Compose File**.
+3. Unter **Domains** beim Service **anubis** deine Domain mit internem Port eintragen, z.B. `https://cve.example.com:8923` (der Port ist nur der Container Port, aufgerufen wird normal über 443).
+4. Unter **Environment Variables** mindestens `ADMIN_EMAILS` setzen (Pflicht), dazu empfohlen `SMTP_URL`, `SMTP_FROM`, `NVD_API_KEY`; optional `OLLAMA_URL` für eine externe Ollama Instanz und `WALG_S3_PREFIX` mit S3 Zugang für Backups.
+5. **Deploy**. Der erste Build (UI und Go Binary) dauert einige Minuten, danach startet der Erstimport der CVE Historie (Fortschritt im Admin Dashboard).
+
+Impressum und Datenschutzerklärung bearbeitest du in Coolify unter **Persistent Storage** (`coolify/imprint.html`, `coolify/privacy.html`). `SERVICE_HEX_64_SECRETKEY` darf nach dem ersten Start nicht mehr geändert werden, sonst lassen sich gespeicherte Kanal Secrets nicht mehr entschlüsseln. Anubis braucht den Header `X-Real-Ip`; der Standard Proxy von Coolify (Traefik) setzt ihn. Wer in Coolify Caddy als Proxy nutzt, muss den Header dort ergänzen.
+
 ## Datenquellen
 
 | Quelle | Takt | Verfahren |

@@ -1,0 +1,137 @@
+# yourcve for Coolify (Git repository, build pack "Docker Compose")
+#
+#   Docker Compose Location: /docker-compose.coolify.yml
+#
+# Coolify generates the domain, the database password, SECRET_KEY and the
+# Anubis key (magic SERVICE_* variables) and terminates TLS with its proxy:
+#
+#   Coolify proxy (TLS) → anubis:8923 → yourcve:8080 → postgres
+#
+# Only Anubis gets a domain. Set it under Domains for the service "anubis",
+# e.g. https://cve.example.com:8923 (the :8923 is the internal port only).
+
+services:
+  anubis:
+    image: ghcr.io/techarohq/anubis:latest
+    environment:
+      SERVICE_URL_ANUBIS_8923: /
+      BIND: ":8923"
+      TARGET: http://yourcve:8080
+      POLICY_FNAME: /data/cfg/policy.yaml
+      DIFFICULTY: "4"
+      SERVE_ROBOTS_TXT: "true"
+      REDIRECT_DOMAINS: ${SERVICE_FQDN_ANUBIS_8923}
+      ED25519_PRIVATE_KEY_HEX: ${SERVICE_HEX_64_ANUBISKEY}
+    volumes:
+      - type: bind
+        source: ./coolify/anubis-policy.yaml
+        target: /data/cfg/policy.yaml
+        read_only: true
+        content: |
+          bots:
+            - name: yourcve-api-key
+              headers_regex:
+                Authorization: ^Bearer yc_[A-Za-z0-9_-]+$
+              action: ALLOW
+            - name: yourcve-health
+              path_regex: ^/(healthz|readyz|metrics)$
+              action: ALLOW
+            - name: yourcve-email-links
+              path_regex: ^/v1/(unsubscribe|channels/confirm|auth/verify)
+              action: ALLOW
+            - name: yourcve-public-api
+              path_regex: ^/v1/(cves|products|config|plans|channel-types)
+              action: ALLOW
+            - import: (data)/meta/default-config.yaml
+          status_codes:
+            CHALLENGE: 200
+            DENY: 403
+    depends_on:
+      yourcve:
+        condition: service_healthy
+    restart: unless-stopped
+
+  yourcve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://yourcve:${SERVICE_PASSWORD_64_POSTGRES}@postgres:5432/yourcve?sslmode=disable
+      BASE_URL: ${SERVICE_URL_ANUBIS_8923}
+      SECRET_KEY: ${SERVICE_HEX_64_SECRETKEY}          # never change it after the first start
+      ADMIN_EMAILS: ${ADMIN_EMAILS:?}
+      REGISTRATION_OPEN: ${REGISTRATION_OPEN:-true}
+      SMTP_URL: ${SMTP_URL}                             # empty: login links in the log
+      SMTP_FROM: ${SMTP_FROM}
+      NVD_API_KEY: ${NVD_API_KEY}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      INITIAL_IMPORT: ${INITIAL_IMPORT:-true}
+      OSV_ECOSYSTEMS: ${OSV_ECOSYSTEMS:-npm,PyPI,Go,Maven,crates.io,NuGet,Packagist,RubyGems,Hex,Pub}
+      OLLAMA_URL: ${OLLAMA_URL}                         # external Ollama, empty = without AI
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b-instruct}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      SUMMARY_LANG: en
+      SEVEN_API_KEY: ${SEVEN_API_KEY}                   # later with Plus
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}           # later with Plus
+      TRUST_PROXY: "true"
+      IMPRINT_FILE: /config/imprint.html
+      PRIVACY_FILE: /config/privacy.html
+      TMPDIR: /work
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - yourcve-work:/work
+      - type: bind
+        source: ./coolify/imprint.html
+        target: /config/imprint.html
+        read_only: true
+        content: |
+          <h2>Imprint</h2>
+          <p>Edit this file in Coolify under Persistent Storage: name, address and contact of the operator.</p>
+      - type: bind
+        source: ./coolify/privacy.html
+        target: /config/privacy.html
+        read_only: true
+        content: |
+          <h2>Privacy policy</h2>
+          <p>Edit this file in Coolify under Persistent Storage. See config/privacy.html in the repository for the points to cover.</p>
+    healthcheck:
+      test: ["CMD", "/yourcve", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  postgres:
+    build:
+      context: ./deploy/postgres
+    environment:
+      POSTGRES_USER: yourcve
+      POSTGRES_DB: yourcve
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
+      WALG_S3_PREFIX: ${WALG_S3_PREFIX}                 # e.g. s3://bucket/yourcve, empty = no backups
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-eu-central-1}
+      AWS_ENDPOINT: ${AWS_ENDPOINT}
+      AWS_S3_FORCE_PATH_STYLE: ${AWS_S3_FORCE_PATH_STYLE:-false}
+      WALG_COMPRESSION_METHOD: zstd
+      BACKUP_RETAIN_FULL: ${BACKUP_RETAIN_FULL:-7}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "yourcve", "-d", "yourcve"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+volumes:
+  pg-data:
+  yourcve-work:
