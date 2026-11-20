@@ -20,7 +20,9 @@ services:
       POLICY_FNAME: /data/cfg/policy.yaml
       DIFFICULTY: "4"
       SERVE_ROBOTS_TXT: "true"
-      REDIRECT_DOMAINS: ${SERVICE_FQDN_ANUBIS_8923}
+      # Hostnames Anubis may redirect back to after the challenge, e.g.
+      # cve.example.com (comma separated, no scheme, no port). Empty = any.
+      REDIRECT_DOMAINS: ${ANUBIS_REDIRECT_DOMAINS:-}
       ED25519_PRIVATE_KEY_HEX: ${SERVICE_HEX_64_ANUBISKEY}
     volumes:
       - type: bind

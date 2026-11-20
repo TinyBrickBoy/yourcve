@@ -34,7 +34,7 @@ Für Coolify gibt es `docker-compose.coolify.yml`. Coolify erzeugt Domain, Daten
 1. In Coolify: Projekt öffnen, **+ New**, das Git Repository wählen (öffentlich oder per GitHub App).
 2. Unter **General**: Build Pack **Docker Compose**, Base Directory `/`, Docker Compose Location `/docker-compose.coolify.yml`. Speichern und **Reload Compose File**.
 3. Unter **Domains** beim Service **anubis** deine Domain mit internem Port eintragen, z.B. `https://cve.example.com:8923` (der Port ist nur der Container Port, aufgerufen wird normal über 443).
-4. Unter **Environment Variables** mindestens `ADMIN_EMAILS` setzen (Pflicht), dazu empfohlen `SMTP_URL`, `SMTP_FROM`, `NVD_API_KEY`; optional `OLLAMA_URL` für eine externe Ollama Instanz und `WALG_S3_PREFIX` mit S3 Zugang für Backups.
+4. Unter **Environment Variables** mindestens `ADMIN_EMAILS` setzen (Pflicht) und `ANUBIS_REDIRECT_DOMAINS` auf deinen Hostnamen ohne `https://` und ohne Port (z.B. `cve.example.com`; leer erlaubt jede Domain), dazu empfohlen `SMTP_URL`, `SMTP_FROM`, `NVD_API_KEY`; optional `OLLAMA_URL` für eine externe Ollama Instanz und `WALG_S3_PREFIX` mit S3 Zugang für Backups.
 5. **Deploy**. Der erste Build (UI und Go Binary) dauert einige Minuten, danach startet der Erstimport der CVE Historie (Fortschritt im Admin Dashboard).
 
 Impressum und Datenschutzerklärung bearbeitest du in Coolify unter **Persistent Storage** (`coolify/imprint.html`, `coolify/privacy.html`). `SERVICE_HEX_64_SECRETKEY` darf nach dem ersten Start nicht mehr geändert werden, sonst lassen sich gespeicherte Kanal Secrets nicht mehr entschlüsseln. Anubis braucht den Header `X-Real-Ip`; der Standard Proxy von Coolify (Traefik) setzt ihn. Wer in Coolify Caddy als Proxy nutzt, muss den Header dort ergänzen.
