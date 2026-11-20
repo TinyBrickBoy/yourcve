@@ -1,0 +1,760 @@
+openapi: 3.1.0
+info:
+  title: yourcve API
+  version: 1.0.0
+  description: |
+    REST API of yourcve. The web UI, scripts and the local AI use the same endpoints.
+    Authentication: session cookie `yc_session` (UI) or `Authorization: Bearer <api key>`.
+    All errors are returned as `{"error": "message"}` with a matching HTTP status.
+    Times are RFC 3339 strings.
+servers:
+  - url: /
+security:
+  - session: []
+  - bearer: []
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      security: []
+      responses: { "200": { description: ok } }
+  /readyz:
+    get:
+      summary: Readiness (database reachable, migrations done)
+      security: []
+      responses: { "200": { description: ok }, "503": { description: not ready } }
+
+  /v1/config:
+    get:
+      summary: Public instance configuration used by the UI
+      security: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicConfig" }
+
+  # ---------- auth ----------
+  /v1/auth/altcha:
+    get:
+      summary: New ALTCHA proof-of-work challenge (for register and login forms)
+      security: []
+      responses:
+        "200": { description: ALTCHA challenge JSON as expected by the altcha widget }
+  /v1/auth/register:
+    post:
+      summary: Register with email. Sends a confirmation link (magic link) by email.
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, altcha]
+              properties:
+                email: { type: string }
+                altcha: { type: string, description: base64 payload from the altcha widget }
+      responses:
+        "202": { description: email sent (also returned when the address already exists) }
+        "400": { description: invalid input or captcha }
+        "429": { description: rate limited }
+  /v1/auth/magic-link:
+    post:
+      summary: Request a login link by email
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, altcha]
+              properties:
+                email: { type: string }
+                altcha: { type: string }
+      responses:
+        "202": { description: email sent if the account exists }
+  /v1/auth/verify:
+    get:
+      summary: Consume a magic link token, set the session cookie and redirect to `/` (or `/login?error=invalid_link`)
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        "302": { description: redirect }
+  /v1/auth/logout:
+    post:
+      summary: End the session
+      responses: { "204": { description: ok } }
+  /v1/auth/passkey/login/begin:
+    post:
+      summary: Start a passkey login (discoverable credential). Returns WebAuthn `PublicKeyCredentialRequestOptions` JSON (`{publicKey: ...}`).
+      security: []
+      responses: { "200": { description: options } }
+  /v1/auth/passkey/login/finish:
+    post:
+      summary: Finish the passkey login. Body is the JSON-serialized credential from navigator.credentials.get(). Sets the session cookie.
+      security: []
+      responses: { "200": { description: "returns Me" } }
+  /v1/auth/passkey/register/begin:
+    post:
+      summary: Add a passkey to the logged in account. Returns `{publicKey: PublicKeyCredentialCreationOptions}`.
+      responses: { "200": { description: options } }
+  /v1/auth/passkey/register/finish:
+    post:
+      summary: Finish adding a passkey. Body is the JSON-serialized credential from navigator.credentials.create(). Optional query `name`.
+      responses: { "201": { description: created } }
+
+  /v1/me:
+    get:
+      summary: Current user
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { description: not logged in }
+    delete:
+      summary: Delete own account and all data (GDPR)
+      responses: { "204": { description: deleted } }
+
+  /v1/passkeys:
+    get:
+      summary: List own passkeys
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Passkey" } }
+  /v1/passkeys/{id}:
+    delete:
+      summary: Remove a passkey
+      responses: { "204": { description: ok } }
+
+  /v1/apikeys:
+    get:
+      summary: List API keys (without secret)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/APIKey" } }
+    post:
+      summary: Create an API key. The plain key is only returned once.
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string } } }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/APIKey"
+                  - type: object
+                    properties: { key: { type: string } }
+  /v1/apikeys/{id}:
+    delete:
+      summary: Revoke an API key
+      responses: { "204": { description: ok } }
+
+  # ---------- CVEs ----------
+  /v1/cves:
+    get:
+      summary: Search CVEs
+      security: []
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: "full text, or a CVE id" }
+        - { name: severity, in: query, schema: { type: string, enum: [none, low, medium, high, critical] }, description: "comma separated allowed" }
+        - { name: kev, in: query, schema: { type: boolean } }
+        - { name: cwe, in: query, schema: { type: string }, description: "e.g. CWE-79" }
+        - { name: min_epss, in: query, schema: { type: number } }
+        - { name: min_cvss, in: query, schema: { type: number } }
+        - { name: since, in: query, schema: { type: string, format: date-time }, description: "published at or after" }
+        - { name: limit, in: query, schema: { type: integer, default: 25, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer, description: "capped at 10000" }
+                  items: { type: array, items: { $ref: "#/components/schemas/CVESummary" } }
+  /v1/cves/{id}:
+    get:
+      summary: CVE details incl. affected products and AI summary
+      security: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CVEDetail" }
+        "404": { description: unknown }
+  /v1/search/semantic:
+    post:
+      summary: Semantic search (needs Ollama). Optional restriction to a stack.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string }
+                stack_id: { type: integer }
+                limit: { type: integer, default: 20 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/CVESummary"
+                        - type: object
+                          properties: { distance: { type: number } }
+        "503": { description: AI not configured }
+
+  /v1/products:
+    get:
+      summary: Product autocomplete for the stack builder
+      security: []
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 15 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Product" } }
+
+  # ---------- stacks ----------
+  /v1/stacks:
+    get:
+      summary: Own stacks
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Stack" } }
+    post:
+      summary: Create a stack (free plan max 5)
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string } } }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stack" }
+        "403": { description: plan limit reached }
+  /v1/stacks/{id}:
+    get:
+      summary: Stack with items
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stack" }
+    patch:
+      summary: Rename
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stack" }
+    delete:
+      summary: Delete stack
+      responses: { "204": { description: ok } }
+  /v1/stacks/{id}/items:
+    post:
+      summary: Add a product. `version` empty or "*" means all versions.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id]
+              properties:
+                product_id: { type: integer }
+                version: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StackItem" }
+  /v1/stacks/{id}/items/{item_id}:
+    patch:
+      summary: Change version
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { version: { type: string } } }
+      responses: { "200": { description: "StackItem" } }
+    delete:
+      summary: Remove product
+      responses: { "204": { description: ok } }
+  /v1/stacks/{id}/import:
+    post:
+      summary: |
+        Import items from a manifest or SBOM. Send multipart/form-data with field `file`
+        (filename is used for type detection) or the raw body with query `filename`.
+        Supported: package.json, go.mod, requirements.txt, docker-compose.yml/compose.yaml,
+        CycloneDX JSON (*.cdx.json, bom.json), SPDX JSON (*.spdx.json).
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: integer }
+                  skipped: { type: array, items: { type: string } }
+                  items: { type: array, items: { $ref: "#/components/schemas/StackItem" } }
+  /v1/stacks/{id}/cves:
+    get:
+      summary: All CVEs that affect the stack
+      parameters:
+        - { name: include_resolved, in: query, schema: { type: boolean, default: false }, description: "include not_affected / patched" }
+        - { name: min_cvss, in: query, schema: { type: number } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/StackCVE" } }
+  /v1/stacks/{id}/cves/{cve_id}/status:
+    put:
+      summary: Set assessment for a CVE in this stack. Status "open" removes the assessment.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [open, not_affected, patched] }
+                note: { type: string }
+      responses: { "204": { description: ok } }
+
+  # ---------- channels ----------
+  /v1/channel-types:
+    get:
+      summary: Available channel types incl. class (free/paid) and form fields
+      security: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ChannelType" } }
+  /v1/channels:
+    get:
+      summary: Own channels (config secrets are masked)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Channel" } }
+    post:
+      summary: |
+        Create a channel (free plan max 5). Email channels get a confirmation link (double opt-in),
+        all other channels are verified with the test message (`POST /v1/channels/{id}/test`).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, name, config]
+              properties:
+                type: { type: string }
+                name: { type: string }
+                config: { type: object, additionalProperties: { type: string } }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "402": { description: paid channel, not available (coming soon) }
+  /v1/channels/{id}:
+    delete:
+      summary: Delete channel
+      responses: { "204": { description: ok } }
+  /v1/channels/{id}/test:
+    post:
+      summary: Send a test message. Success marks non-email channels as verified.
+      responses:
+        "200": { description: "{ok: true}" }
+        "502": { description: "{error} delivery failed" }
+  /v1/channels/confirm:
+    get:
+      summary: Email double opt-in link target; redirects to /channels?confirmed=1
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses: { "302": { description: redirect } }
+  /v1/unsubscribe:
+    get:
+      summary: Unsubscribe link in every email (disables the channel); redirects to /unsubscribed
+      security: []
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses: { "302": { description: redirect } }
+
+  # ---------- rules ----------
+  /v1/rules:
+    get:
+      summary: Notification rules of all own stacks
+      parameters:
+        - { name: stack_id, in: query, schema: { type: integer } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Rule" } }
+    post:
+      summary: Create rule (stack × channel)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleInput" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rule" }
+  /v1/rules/{id}:
+    patch:
+      summary: Update rule (all fields optional)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleInput" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rule" }
+    delete:
+      summary: Delete rule
+      responses: { "204": { description: ok } }
+
+  # ---------- deliveries ----------
+  /v1/deliveries:
+    get:
+      summary: Delivery log (newest first)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, digest, sent, failed, suppressed] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Delivery" } }
+  /v1/deliveries/{id}/retry:
+    post:
+      summary: Retry a failed delivery
+      responses: { "202": { description: queued } }
+
+  /v1/credits:
+    get:
+      summary: Balance and bookings (Plus plan, coming soon; currently always 0)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balance: { type: integer }
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        kind: { type: string, enum: [topup, charge, refund] }
+                        amount: { type: integer }
+                        note: { type: string }
+                        created_at: { type: string }
+  /v1/plans:
+    get:
+      summary: Plans shown on the plan page
+      security: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Plan" } }
+
+  /v1/events:
+    get:
+      summary: |
+        Server-Sent Events stream of new matches for the current user.
+        Event name `match`, data `{"stack_id":1,"cve_id":"CVE-2026-1234","occasion":"new"}`.
+      responses: { "200": { description: text/event-stream } }
+
+  # ---------- admin ----------
+  /v1/admin/status:
+    get:
+      summary: Admin dashboard data (role admin)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminStatus" }
+
+  /mcp:
+    post:
+      summary: MCP endpoint (Streamable HTTP). Read-only tools. Requires API key.
+      responses: { "200": { description: MCP } }
+
+components:
+  securitySchemes:
+    session: { type: apiKey, in: cookie, name: yc_session }
+    bearer: { type: http, scheme: bearer }
+  schemas:
+    PublicConfig:
+      type: object
+      properties:
+        base_url: { type: string }
+        ai_enabled: { type: boolean }
+        registration_open: { type: boolean }
+        free_limits:
+          type: object
+          properties: { stacks: { type: integer }, channels: { type: integer } }
+        imprint_html: { type: string, description: "operator supplied, may be empty" }
+        privacy_html: { type: string }
+    Me:
+      type: object
+      properties:
+        id: { type: integer }
+        email: { type: string }
+        role: { type: string, enum: [user, admin] }
+        plan: { type: string, enum: [free, plus] }
+        created_at: { type: string }
+        limits:
+          type: object
+          properties: { stacks: { type: integer }, channels: { type: integer } }
+        usage:
+          type: object
+          properties: { stacks: { type: integer }, channels: { type: integer } }
+    Passkey:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        created_at: { type: string }
+        last_used_at: { type: string, nullable: true }
+    APIKey:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        prefix: { type: string, description: "first characters, e.g. yc_ab12" }
+        created_at: { type: string }
+        last_used_at: { type: string, nullable: true }
+    CVESummary:
+      type: object
+      properties:
+        id: { type: string, example: CVE-2024-6387 }
+        description: { type: string }
+        cvss: { type: number, nullable: true }
+        cvss_version: { type: string, nullable: true }
+        severity: { type: string, enum: [none, low, medium, high, critical, unknown] }
+        cwe: { type: array, items: { type: string } }
+        kev: { type: boolean }
+        epss: { type: number, nullable: true }
+        epss_percentile: { type: number, nullable: true }
+        published: { type: string, nullable: true }
+        modified: { type: string, nullable: true }
+        category: { type: string, nullable: true, description: "AI category (RCE, XSS, DoS, ...)" }
+        summary: { type: string, nullable: true, description: "AI generated summary (English)" }
+    CVEDetail:
+      allOf:
+        - $ref: "#/components/schemas/CVESummary"
+        - type: object
+          properties:
+            title: { type: string, nullable: true }
+            cvss_vector: { type: string, nullable: true }
+            kev_added: { type: string, nullable: true }
+            kev_due: { type: string, nullable: true }
+            kev_action: { type: string, nullable: true }
+            references: { type: array, items: { type: string } }
+            sources: { type: array, items: { type: string }, description: "cvelist, nvd, osv, kev, epss" }
+            ai_model: { type: string, nullable: true }
+            affects:
+              type: array
+              items: { $ref: "#/components/schemas/Affect" }
+    Affect:
+      type: object
+      properties:
+        product: { $ref: "#/components/schemas/Product" }
+        version_start_including: { type: string, nullable: true }
+        version_start_excluding: { type: string, nullable: true }
+        version_end_including: { type: string, nullable: true }
+        version_end_excluding: { type: string, nullable: true }
+        versions: { type: array, items: { type: string }, description: exact affected versions }
+        source: { type: string, enum: [nvd, osv, cna] }
+        confirmed: { type: boolean }
+    Product:
+      type: object
+      properties:
+        id: { type: integer }
+        vendor: { type: string }
+        name: { type: string }
+        ecosystem: { type: string, description: "cpe, npm, PyPI, Go, Maven, crates.io, Debian, ..." }
+        cpe: { type: string, nullable: true, description: "cpe:2.3:a:vendor:product" }
+        purl: { type: string, nullable: true }
+        aliases: { type: array, items: { type: string } }
+    Stack:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        created_at: { type: string }
+        item_count: { type: integer }
+        open_cves: { type: integer }
+        critical_cves: { type: integer }
+        items: { type: array, items: { $ref: "#/components/schemas/StackItem" }, description: "only on GET /v1/stacks/{id}" }
+    StackItem:
+      type: object
+      properties:
+        id: { type: integer }
+        product: { $ref: "#/components/schemas/Product" }
+        version: { type: string, description: "* = all versions" }
+    StackCVE:
+      allOf:
+        - $ref: "#/components/schemas/CVESummary"
+        - type: object
+          properties:
+            reason: { type: string, description: "why it matched, e.g. 'nginx 1.24.0 < 1.25.4 (nvd)'" }
+            confirmed: { type: boolean }
+            status: { type: string, enum: [open, not_affected, patched] }
+            matched_at: { type: string }
+    ChannelType:
+      type: object
+      properties:
+        type: { type: string, example: discord }
+        label: { type: string }
+        class: { type: string, enum: [free, paid] }
+        available: { type: boolean, description: "false for paid channels (coming soon)" }
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              label: { type: string }
+              placeholder: { type: string }
+              secret: { type: boolean }
+              required: { type: boolean }
+              help: { type: string }
+    Channel:
+      type: object
+      properties:
+        id: { type: integer }
+        type: { type: string }
+        name: { type: string }
+        class: { type: string, enum: [free, paid] }
+        verified: { type: boolean }
+        enabled: { type: boolean }
+        config: { type: object, additionalProperties: { type: string }, description: secret values masked as "••••" }
+        created_at: { type: string }
+    RuleInput:
+      type: object
+      properties:
+        stack_id: { type: integer }
+        channel_id: { type: integer }
+        min_cvss: { type: number, default: 0 }
+        kev_only: { type: boolean, default: false }
+        min_epss: { type: number, default: 0 }
+        mode: { type: string, enum: [instant, hourly, daily], default: instant }
+        quiet_start: { type: string, nullable: true, example: "22:00" }
+        quiet_end: { type: string, nullable: true, example: "07:00" }
+        timezone: { type: string, default: UTC }
+        include_unconfirmed: { type: boolean, default: true }
+        enabled: { type: boolean, default: true }
+    Rule:
+      allOf:
+        - $ref: "#/components/schemas/RuleInput"
+        - type: object
+          properties:
+            id: { type: integer }
+            stack_name: { type: string }
+            channel_name: { type: string }
+            channel_type: { type: string }
+    Delivery:
+      type: object
+      properties:
+        id: { type: integer }
+        cve_id: { type: string }
+        stack_id: { type: integer }
+        stack_name: { type: string }
+        channel_id: { type: integer }
+        channel_name: { type: string }
+        occasion: { type: string, enum: [new, kev_added, cvss_raised] }
+        status: { type: string, enum: [pending, digest, sent, failed, suppressed] }
+        attempts: { type: integer }
+        last_error: { type: string, nullable: true }
+        next_attempt_at: { type: string, nullable: true }
+        sent_at: { type: string, nullable: true }
+        created_at: { type: string }
+    Plan:
+      type: object
+      properties:
+        id: { type: string, enum: [free, plus] }
+        name: { type: string }
+        price: { type: string, example: "9.99 €/month" }
+        available: { type: boolean }
+        coming_soon: { type: boolean }
+        features: { type: array, items: { type: string } }
+    AdminStatus:
+      type: object
+      properties:
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              source: { type: string }
+              cursor: { type: string }
+              last_run: { type: string, nullable: true }
+              last_success: { type: string, nullable: true }
+              last_error: { type: string, nullable: true }
+              lag_seconds: { type: number, nullable: true, description: "now - newest item seen" }
+              items_total: { type: integer }
+        queue:
+          type: object
+          properties:
+            available: { type: integer }
+            running: { type: integer }
+            retryable: { type: integer }
+            scheduled: { type: integer }
+        deliveries:
+          type: object
+          properties:
+            pending: { type: integer }
+            failed_24h: { type: integer }
+            sent_24h: { type: integer }
+        recent_failures: { type: array, items: { $ref: "#/components/schemas/Delivery" } }
+        counts:
+          type: object
+          properties:
+            cves: { type: integer }
+            products: { type: integer }
+            users: { type: integer }
+            stacks: { type: integer }
+            ai_summaries: { type: integer }
+            embeddings: { type: integer }

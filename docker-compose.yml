@@ -1,0 +1,134 @@
+# yourcve: complete deployment
+#
+#   cp .env.example .env      # fill in the values
+#   docker compose up -d      # Anubis + yourcve + PostgreSQL
+#   docker compose --profile ai up -d    # additionally local Ollama
+#   docker compose --profile tls up -d   # additionally Caddy with automatic HTTPS
+#
+# Traffic: Internet → (Caddy :443) → Anubis :8923 → yourcve :8080 → PostgreSQL
+# Only Anubis (and Caddy) publish ports; yourcve and PostgreSQL stay internal.
+
+name: yourcve
+
+services:
+  anubis:                                   # self-hosted bot protection (proof of work)
+    image: ghcr.io/techarohq/anubis:${ANUBIS_VERSION:-latest}
+    environment:
+      BIND: ":8923"
+      TARGET: http://yourcve:8080
+      POLICY_FNAME: /data/cfg/policy.yaml    # /v1 and /mcp with API key pass through
+      DIFFICULTY: "4"
+      SERVE_ROBOTS_TXT: "true"
+      REDIRECT_DOMAINS: ${DOMAIN:-localhost}   # only redirect back to our own domain
+      # Behind Caddy the client IP comes in X-Real-Ip. Without a proxy in front
+      # set ANUBIS_USE_REMOTE_ADDRESS=true in .env.
+      USE_REMOTE_ADDRESS: ${ANUBIS_USE_REMOTE_ADDRESS:-false}
+      # fixed signing key: challenge cookies survive Anubis restarts
+      ED25519_PRIVATE_KEY_HEX: ${ANUBIS_PRIVATE_KEY_HEX:-}
+    volumes:
+      - ./deploy/anubis-policy.yaml:/data/cfg/policy.yaml:ro
+    ports:
+      - "${ANUBIS_PORT:-8923}:8923"          # your reverse proxy points here
+    depends_on:
+      yourcve: { condition: service_healthy }
+    restart: unless-stopped
+
+  yourcve:
+    build:
+      context: .
+      args:
+        VERSION: ${YOURCVE_VERSION:-dev}
+    image: ${YOURCVE_IMAGE:-ghcr.io/tinybrickboy/yourcve:latest}
+    environment:
+      DATABASE_URL: postgres://yourcve:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/yourcve?sslmode=disable
+      BASE_URL: ${BASE_URL:?set BASE_URL, e.g. https://yourcve.example.com}
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY (openssl rand -hex 32)}   # encrypts channel secrets
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      REGISTRATION_OPEN: ${REGISTRATION_OPEN:-true}
+      OLLAMA_URL: ${OLLAMA_URL:-}                # empty = without AI
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b-instruct}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      SUMMARY_LANG: en
+      SMTP_URL: ${SMTP_URL:-}                    # empty = login links are written to the log
+      SMTP_FROM: ${SMTP_FROM:-}
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      SEVEN_API_KEY: ${SEVEN_API_KEY:-}          # later with Plus
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}  # later with Plus
+      INITIAL_IMPORT: ${INITIAL_IMPORT:-true}
+      OSV_ECOSYSTEMS: ${OSV_ECOSYSTEMS:-npm,PyPI,Go,Maven,crates.io,NuGet,Packagist,RubyGems,Hex,Pub}
+      TRUST_PROXY: "true"
+      IMPRINT_FILE: /config/imprint.html
+      PRIVACY_FILE: /config/privacy.html
+      TMPDIR: /work                              # initial import archives (several GB)
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./config:/config:ro
+      - yourcve-work:/work
+    expose: ["8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+    stop_grace_period: 30s                       # running deliveries finish before exit
+
+  postgres:
+    build: ./deploy/postgres
+    image: ${POSTGRES_IMAGE:-ghcr.io/tinybrickboy/yourcve-postgres:17}   # pgvector + WAL-G
+    environment:
+      POSTGRES_USER: yourcve
+      POSTGRES_DB: yourcve
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      # WAL-G → S3 (leave WALG_S3_PREFIX empty to disable backups)
+      WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-eu-central-1}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}            # for S3 compatible storage (MinIO, Hetzner, ...)
+      AWS_S3_FORCE_PATH_STYLE: ${AWS_S3_FORCE_PATH_STYLE:-false}
+      WALG_COMPRESSION_METHOD: zstd
+      BACKUP_RETAIN_FULL: ${BACKUP_RETAIN_FULL:-7}
+    volumes:
+      - ./pg:/var/lib/postgresql/data
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "yourcve", "-d", "yourcve"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  ollama:                                     # optional: docker compose --profile ai up -d
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    profiles: ["ai"]
+    volumes:
+      - ./ollama:/root/.ollama
+    expose: ["11434"]
+    restart: unless-stopped
+
+  ollama-pull:                                # pulls the two models once
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    profiles: ["ai"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c", "sleep 5; ollama pull ${OLLAMA_MODEL:-qwen2.5:3b-instruct} && ollama pull ${OLLAMA_EMBED_MODEL:-nomic-embed-text}"]
+    depends_on: [ollama]
+    restart: "no"
+
+  caddy:                                      # optional: docker compose --profile tls up -d
+    image: caddy:2
+    profiles: ["tls"]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on: [anubis]
+    restart: unless-stopped
+
+volumes:
+  yourcve-work:
+  caddy-data:
