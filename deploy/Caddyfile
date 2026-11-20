@@ -1,0 +1,9 @@
+# TLS termination in front of Anubis (docker compose --profile tls up -d).
+# Set DOMAIN in .env; Caddy fetches the certificate automatically.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy anubis:8923 {
+		header_up X-Real-Ip {remote_host}
+		flush_interval -1
+	}
+}

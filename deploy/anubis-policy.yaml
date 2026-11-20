@@ -1,0 +1,33 @@
+# Anubis policy for yourcve.
+# Rules are evaluated top to bottom; the first match wins.
+bots:
+  # API and MCP clients with a yourcve API key are never challenged
+  # (scripts, CI, the local AI via MCP). The key itself is checked by yourcve.
+  - name: yourcve-api-key
+    headers_regex:
+      Authorization: ^Bearer yc_[A-Za-z0-9_-]+$
+    action: ALLOW
+
+  # Health checks and Prometheus
+  - name: yourcve-health
+    path_regex: ^/(healthz|readyz|metrics)$
+    action: ALLOW
+
+  # Links opened by mail clients / one-click unsubscribe (RFC 8058) and
+  # email confirmation links must work without JavaScript
+  - name: yourcve-email-links
+    path_regex: ^/v1/(unsubscribe|channels/confirm|auth/verify)
+    action: ALLOW
+
+  # Public read API without key (CVE search for scripts): rate limited by yourcve
+  - name: yourcve-public-api
+    path_regex: ^/v1/(cves|products|config|plans|channel-types)
+    action: ALLOW
+
+  # Anubis defaults: deny pathological bots, block AI scrapers, allow good
+  # search engines, challenge browsers on everything else (UI pages)
+  - import: (data)/meta/default-config.yaml
+
+status_codes:
+  CHALLENGE: 200
+  DENY: 403
